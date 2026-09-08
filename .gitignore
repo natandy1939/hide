@@ -1,0 +1,74 @@
+﻿# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# C extensions
+*.so
+
+# Distribution / packaging
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+share/python-wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+MANIFEST
+
+# Virtual Environments
+venv/
+.venv/
+ENV/
+env/
+env.bak/
+venv.bak/
+
+# Environment Variables & Secrets
+.env
+.env.*
+
+# IDEs and Editors
+.vscode/
+.idea/
+*.sublime-project
+*.sublime-workspace
+*.swp
+*.swo
+
+# OS Generated Files
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Logs
+*.log
+logs/
+
+# Candidate Datasets & Confidential Outputs
+test/
+result/
+data/
+
+# Temporary / Generated Test Artifacts
+synthetic_multilingual_cv.pdf
+sanitized_cv.pdf
+scanned_cv.pdf
+sanitized_scanned_cv.pdf
+test_avatar.jpg
+avatar.jpg
+*.onnx
+
+# ML Models & Caches
+.cache/
+hf_models/
