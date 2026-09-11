@@ -92,7 +92,8 @@ def run_batch():
                     att_doc = fitz.open(p)
                     att_names = redactor._extract_attestation_names(att_doc)
                     att_doc.close()
-                    cand_names.update(att_names)
+                    for aname in att_names:
+                        cand_names.update(redactor._generate_candidate_search_strings(aname))
                 except Exception as e:
                     logger.debug(f"Could not extract attestation names from {p}: {e}")
 

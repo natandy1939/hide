@@ -9,9 +9,36 @@ import numpy as np
 from PIL import Image, ImageDraw
 
 from config import create_analyzer_engine, detect_language
-from face_detector import ProfilePhotoDetector
 
 logger = logging.getLogger(__name__)
+
+# Common Moroccan, French, and International given names that must NEVER be redacted as a single word alone
+# (Prevents over-redacting "Université Mohammed V", "Lycée Hassan II", "Avenue Allal Ben Abdellah", etc.)
+COMMON_GIVEN_NAMES: Set[str] = {
+    # French / Moroccan / International given names (Latin)
+    'mohammed', 'mohamed', 'mohammad', 'ahmed', 'youssef', 'yousef', 'ali', 'hassan', 'houssam',
+    'amine', 'mehdi', 'hamza', 'omar', 'othman', 'khalid', 'tarik', 'tariq', 'anas',
+    'karim', 'morad', 'mourad', 'mustapha', 'mostafa', 'adil', 'said', 'rachid', 'rachida',
+    'fatima', 'khadija', 'salma', 'sara', 'sarah', 'iman', 'imane', 'meriem', 'meryem',
+    'soukaina', 'asmaa', 'asma', 'chaimae', 'chaima', 'nouhaila', 'zineb', 'nassima',
+    'laila', 'doha', 'soufyane', 'soufiane', 'rachad', 'madiha', 'yassine', 'samir',
+    'abdellah', 'abdallah', 'abdelaziz', 'abdelkader', 'abderrahim', 'abdelali',
+    'hicham', 'nabil', 'jamal', 'driss', 'idriss', 'faycal', 'faysal', 'anwar', 'anouar',
+    'safaa', 'hanaa', 'wafa', 'wafaa', 'kaoutar', 'kawtar', 'ghita', 'loubna', 'bouchra',
+    'mona', 'mouna', 'najlae', 'najwa', 'hanane', 'ihsane', 'mariam', 'marwa', 'hajar',
+    'jean', 'pierre', 'michel', 'paul', 'marie', 'alain', 'philippe', 'nicolas',
+    'alexandre', 'thomas', 'laurent', 'julien', 'david', 'antoine', 'stephane',
+    'john', 'michael', 'david', 'james', 'robert', 'william', 'mary', 'sarah',
+    # Arabic given names
+    'محمد', 'أحمد', 'يوسف', 'علي', 'حسن', 'أمين', 'مهدي', 'حمزة', 'عمر', 'عثمان',
+    'خالد', 'طارق', 'أنس', 'كريم', 'مراد', 'مصطفى', 'عادل', 'سعيد', 'رشيد', 'رشيدة',
+    'فاطمة', 'خديجة', 'سلمى', 'سارة', 'إيمان', 'مريم', 'سكينة', 'أسماء', 'شيماء',
+    'نهيلة', 'زينب', 'نسيمة', 'ليلى', 'ضحى', 'سفيان', 'رشاد', 'مديحة', 'ياسين', 'سمير',
+    'عبد', 'عبدالله', 'عبد الله', 'عبدالعزيز', 'عبد العزيز', 'عبدالرحمن', 'عبد الرحمن',
+    'عبدالرحيم', 'عبد الكريم', 'عبدالكريم', 'هشام', 'نبيل', 'جمال', 'إدريس', 'فيصل',
+    'أنور', 'صفاء', 'هناء', 'وفاء', 'كوثر', 'غيثة', 'لبنى', 'بشرى', 'منى', 'نجلاء',
+    'نجوى', 'حنان', 'إحسان', 'مروة', 'هاجر', 'الخامس', 'الأول', 'الثاني'
+}
 
 # Comprehensive domain stopwords: Terms in resumes/certificates that must NEVER be redacted as names
 RESUME_STOPWORDS: Set[str] = {
@@ -96,7 +123,9 @@ RESUME_STOPWORDS: Set[str] = {
     'وجذة', 'مكناس', 'تطوان', 'الناظور', 'المحمدية', 'الجديدة', 'آسفي',
     'مغربية', 'مغربي', 'السن', 'سنة', 'الجنسية', 'الحالة', 'العائلية',
     'متزوج', 'عازب', 'أعزب', 'نبذة', 'عني', 'الهوايات', 'التخصص',
-    'دكتور', 'مهندس', 'تقني', 'مدير', 'رئيس', 'مسؤول', 'مستشار'
+    'دكتور', 'مهندس', 'تقني', 'مدير', 'رئيس', 'مسؤول', 'مستشار',
+    'الشواهد', 'شواهد', 'أكاديمية', 'األكاديمية', 'الأكاديمية', 'االكاديمية',
+    'أكاديمي', 'األكاديمي', 'الأكاديمي', 'تجارب', 'تكوينات', 'تكوين', 'الشخصية'
 }
 
 
@@ -187,9 +216,6 @@ class CVRedactor:
             logger.warning(f"Presidio AnalyzerEngine initialization warning: {e}")
             self.analyzer = None
 
-        logger.info("Initializing ProfilePhotoDetector...")
-        self.face_detector = ProfilePhotoDetector()
-
         self._ocr_engine = None
 
     def _get_ocr_engine(self):
@@ -231,6 +257,7 @@ class CVRedactor:
                         word = re.sub(r'##', '', word).strip()
                         word = re.sub(r'\s+', ' ', word)
                         clean_word = re.sub(r'[^\w\s\u0600-\u06FF\uFB50-\uFEFF\-\.]', '', word).strip()
+                        clean_word = re.sub(r'^(?:المغرب|المملكة المغربية|الدار البيضاء|الرباط|سلا|فاس|طنجة|مكناس|أكادير|تطوان|وجدة|القنيطرة)\s*', '', clean_word)
                         tokens = clean_word.split()
 
                         # Must have 2 to 4 words or be a distinct Arabic multi-token name
@@ -282,25 +309,32 @@ class CVRedactor:
                                 names.add(w)
         return names
 
-    def _identify_candidate_names(self, doc: fitz.Document) -> Set[str]:
+    def _extract_single_candidate_name(self, doc: fitz.Document) -> Optional[str]:
         """
-        Extracts the candidate's actual name from the document using:
-        1. Labeled patterns (Nom:, Name:, الاسم الكامل:, etc.)
-        2. Attestation / Certificate recipient patterns (certifie que M. X, décernée à Y)
-        3. Top 35% Page 1 header blocks analyzed with Davlan Transformer NER
-        4. Prominent capital header strings
-        5. RapidOCR analysis on embedded header image cards (for Canva/Word exported headers)
-        6. Arabic text normalization and Arabic NER
+        Pinpoints the SINGLE primary candidate name on the CV using:
+        1. Explicit labeled fields (Nom:, Name:, الاسم الكامل:)
+        2. Visual font-size layout hierarchy (top 38% of page 1)
+        3. Embedded graphic header card OCR (Canva/Word header cards)
+        4. Scanned page OCR on the first non-blank page
+        5. Davlan Multilingual Transformer NER
         """
-        names: Set[str] = set()
         if len(doc) == 0:
-            return names
+            return None
 
-        page = doc[0]
+        # Find first non-blank page
+        target_page_idx = 0
+        for i in range(min(3, len(doc))):
+            p = doc[i]
+            if len(p.get_text().strip()) > 30 or len(p.get_images()) > 0:
+                target_page_idx = i
+                break
+
+        page = doc[target_page_idx]
         full_text = page.get_text()
 
-        # 1. Check for labeled name field (Latin & Arabic, normalized)
-        norm_label_text = re.sub(r'االسم', 'الاسم', full_text)
+        # 1. Explicit labeled patterns
+        norm_label_text = unicodedata.normalize('NFKC', full_text).replace('\xa0', ' ')
+        norm_label_text = re.sub(r'االسم', 'الاسم', norm_label_text)
         label_match = re.search(
             r'(?:Nom(?:\s+et\s+pr[eé]nom)?|Name|الاسم(?:\s+الكامل)?|المرشح|صاحب\s+السيرة)\s*[:\-]\s*([^\n\r]+(?:\n[^\n\r:]+)?)',
             norm_label_text,
@@ -308,7 +342,6 @@ class CVRedactor:
         )
         if label_match:
             raw_cand = label_match.group(1).strip()
-            # Replace internal newline with space
             candidate_str = re.sub(r'\s+', ' ', raw_cand)
             candidate_str = re.split(r'\s+[\-–•]\s+|\s*\|\s*|[:]', candidate_str)[0].strip()
             candidate_str = re.sub(r'[^\w\s\u0600-\u06FF\uFB50-\uFEFF\-\.]', '', candidate_str).strip()
@@ -316,101 +349,176 @@ class CVRedactor:
             if 1 <= len(words) <= 4:
                 clean = ' '.join(words)
                 if not any(w.lower() in RESUME_STOPWORDS for w in words):
-                    names.add(clean)
+                    return clean
 
-        # 1b. Check for attestation recipient patterns
-        att_names = self._extract_attestation_names(doc)
-        names.update(att_names)
+        # 2. Visual layout hierarchy: font size and top placement
+        try:
+            page_dict = page.get_text('dict')
+            blocks = page_dict.get('blocks', [])
+            spans_by_line = []
+            for b in blocks:
+                if 'lines' in b:
+                    for l in b['lines']:
+                        line_spans = []
+                        for s in l['spans']:
+                            st = s['text'].strip()
+                            if len(st) >= 2 and not re.match(r'^[\d\s\W]+$', st):
+                                if '@' not in st and not re.search(r'(?:\+?212|0[5-7])\d{8}', st):
+                                    line_spans.append(s)
+                        if line_spans:
+                            combined = ' '.join(s['text'].strip() for s in line_spans)
+                            max_sz = max(s['size'] for s in line_spans)
+                            min_y0 = min(s['bbox'][1] for s in line_spans)
+                            if min_y0 < page.rect.height * 0.38:
+                                spans_by_line.append((max_sz, min_y0, combined))
 
-        # 2. Check header text blocks (top 35% of Page 1)
+            # Prioritize top 22% of page first (true header), then fallback to top 38%
+            top_header_spans = [s for s in spans_by_line if s[1] < page.rect.height * 0.22]
+            lower_header_spans = [s for s in spans_by_line if s[1] >= page.rect.height * 0.22]
+
+            for group in [top_header_spans, lower_header_spans]:
+                group.sort(key=lambda x: (-x[0], x[1]))
+                for sz, y0, line_text in group:
+                    clean = re.sub(r'\s+', ' ', line_text).strip()
+                    clean = re.sub(r'^(?:M\.|Mme|Mlle|Monsieur|Madame|Dr\.?|Mr\.?)\s+', '', clean, flags=re.IGNORECASE)
+                    clean = re.sub(r'^(?:المغرب|المملكة المغربية|الدار البيضاء|الرباط|سلا|فاس|طنجة|مكناس|أكادير|تطوان|وجدة|القنيطرة)\s*', '', clean)
+                    words = [w for w in re.split(r'[\s\-]+', clean) if w]
+                    if any(w.lower() in RESUME_STOPWORDS for w in words):
+                        continue
+                    if any(h in clean.upper() for h in ['CURRICULUM', 'VITAE', 'DONNEES', 'PERSONNELS', 'PROFIL', 'CONTACT', 'RESUME']):
+                        continue
+                    if 1 <= len(words) <= 4 and 4 <= len(clean) <= 40:
+                        return clean
+        except Exception as e:
+            logger.debug(f"Visual layout hierarchy error: {e}")
+
+        # 3. Embedded Graphic Header Card OCR (Word/Canva headers)
+        try:
+            for img_info in page.get_images():
+                xref = img_info[0]
+                rects = page.get_image_rects(xref)
+                if rects and rects[0].y0 < page.rect.height * 0.38:
+                    if rects[0].width > 100 and rects[0].height > 25:
+                        pix = fitz.Pixmap(doc, xref)
+                        img_pil = Image.open(io.BytesIO(pix.tobytes()))
+                        ocr_engine = self._get_ocr_engine()
+                        if ocr_engine != "pytesseract":
+                            res = ocr_engine(np.array(img_pil))
+                            txts = []
+                            if hasattr(res, 'txts') and res.txts: txts = res.txts
+                            elif isinstance(res, (list, tuple)) and res and res[0]: txts = [it[1] for it in res[0]]
+                            for line in txts[:6]:
+                                line_clean = line.strip()
+                                line_clean = re.sub(r'^(?:M\.|Mme|Mlle|Monsieur|Madame|Dr\.?|Mr\.?)\s+', '', line_clean, flags=re.IGNORECASE)
+                                words = [w for w in line_clean.split() if w]
+                                if 1 <= len(words) <= 4 and 4 <= len(line_clean) <= 40:
+                                    if not any(w.lower() in RESUME_STOPWORDS for w in words):
+                                        if not any(c in line_clean for c in ['@', 'http', '.com']) and not re.search(r'\d{5,}', line_clean):
+                                            return line_clean
+        except Exception as e:
+            logger.debug(f"Header card OCR error: {e}")
+
+        # 4. Pure Scanned Page OCR Fallback
+        if len(full_text.strip()) < 80:
+            try:
+                pix = page.get_pixmap(dpi=200)
+                img_pil = Image.open(io.BytesIO(pix.tobytes()))
+                ocr_engine = self._get_ocr_engine()
+                if ocr_engine != "pytesseract":
+                    res = ocr_engine(np.array(img_pil))
+                    txts = []
+                    if hasattr(res, 'txts') and res.txts: txts = res.txts
+                    elif isinstance(res, (list, tuple)) and res and res[0]: txts = [it[1] for it in res[0]]
+                    for line in txts[:6]:
+                        line_clean = line.strip()
+                        line_clean = re.sub(r'^(?:M\.|Mme|Mlle|Monsieur|Madame|Dr\.?|Mr\.?)\s+', '', line_clean, flags=re.IGNORECASE)
+                        words = [w for w in line_clean.split() if w]
+                        if 1 <= len(words) <= 4 and 4 <= len(line_clean) <= 40:
+                            if not any(w.lower() in RESUME_STOPWORDS for w in words):
+                                if not any(c in line_clean for c in ['@', 'http', '.com']) and not re.search(r'\d{5,}', line_clean):
+                                    return line_clean
+            except Exception as e:
+                logger.debug(f"Scanned page OCR error: {e}")
+
+        # 5. Fallback: Davlan Transformer NER on Header Text
         header_blocks = [
             b for b in page.get_text('blocks')
-            if b[1] < page.rect.height * 0.35 and b[4].strip()
+            if b[1] < page.rect.height * 0.38 and b[4].strip()
         ]
         header_blocks.sort(key=lambda b: (b[1], b[0]))
-
         header_text = "\n".join(b[4] for b in header_blocks)
+        ner_names = self.extract_names_with_transformer(header_text)
+        if ner_names:
+            return sorted(list(ner_names), key=lambda x: -len(x))[0]
 
-        # Run Transformer NER on header text
-        ner_header_names = self.extract_names_with_transformer(header_text)
-        for n in ner_header_names:
-            names.add(n)
+        return None
 
-        # Also inspect header lines directly for prominent 2-4 word capitalized names
-        for b in header_blocks:
-            lines = [l.strip() for l in b[4].split('\n') if l.strip()]
-            for line in lines:
-                line_first = re.split(r'\s+[\-–•]\s+|\s*\|\s*', line)[0].strip()
-                clean = re.sub(r'[^\w\s\u0600-\u06FF\uFB50-\uFEFF\-\.]', '', line_first).strip()
-                words = clean.split()
-                if 2 <= len(words) <= 4 and len(clean) >= 6:
-                    lower_words = [w.lower() for w in words]
-                    if not any(w in RESUME_STOPWORDS for w in lower_words):
-                        is_case_valid = clean.isupper() or all(w[0].isupper() for w in words if w)
-                        if is_case_valid and re.match(r'^[A-Za-z\s\-\.\'\u0600-\u06FF\uFB50-\uFEFF]+$', clean):
-                            names.add(clean)
-                            break
+    def _generate_candidate_search_strings(self, candidate_name: str) -> Set[str]:
+        """
+        Generates targeted search strings for the single candidate name.
+        Specifically ensures:
+        - Full name is redacted in all case variations.
+        - Inverted First/Last name is redacted.
+        - Distinctive family name is redacted.
+        - COMMON GIVEN NAMES (Mohamed, Ahmed, Ali, Hassan, etc.) are NEVER redacted alone.
+        """
+        targets: Set[str] = set()
+        if not candidate_name:
+            return targets
 
-        # 3. Check for Arabic candidate names across Page 1
-        if any('\u0600' <= c <= '\u06FF' or '\uFB50' <= c <= '\uFEFF' for c in full_text):
-            norm_full = normalize_arabic(full_text)
-            ar_ner_names = self.extract_names_with_transformer(norm_full[:1200])
-            for n in ar_ner_names:
-                norm_n = normalize_arabic(n)
-                words = [w for w in norm_n.split() if len(w) >= 3 and w not in RESUME_STOPWORDS]
-                if 1 <= len(words) <= 4:
-                    names.add(n)
-                    names.add(norm_n)
+        clean = re.sub(r'\s+', ' ', candidate_name).strip()
+        clean = re.sub(r'^(?:M\.|Mme|Mlle|Monsieur|Madame|Dr\.?|Mr\.?)\s+', '', clean, flags=re.IGNORECASE)
+        clean = re.sub(r'^(?:المغرب|المملكة المغربية|الدار البيضاء|الرباط|سلا|فاس|طنجة|مكناس|أكادير|تطوان|وجدة|القنيطرة)\s*', '', clean)
+        if len(clean) < 3:
+            return targets
 
-        # 4. Fallback for embedded header images (e.g. Canva or Word CVs where header is an image)
-        if not names and len(full_text.strip()) < 80:
-            try:
-                for img_info in page.get_images()[:4]:
-                    xref = img_info[0]
-                    rects = page.get_image_rects(xref)
-                    for r in rects:
-                        if r.y0 < page.rect.height * 0.40 and r.width > 80 and r.height > 30:
-                            extracted = doc.extract_image(xref)
-                            pil_img = Image.open(io.BytesIO(extracted["image"]))
-                            ocr_engine = self._get_ocr_engine()
-                            if ocr_engine != "pytesseract":
-                                res = ocr_engine(pil_img)
-                                txt_list = []
-                                if hasattr(res, 'txts') and res.txts:
-                                    txt_list = list(res.txts)
-                                elif isinstance(res, (list, tuple)) and res and res[0]:
-                                    txt_list = [item[1] for item in res[0]]
-                                
-                                ocr_text = "\n".join(txt_list)
-                                img_names = self.extract_names_with_transformer(ocr_text)
-                                for n in img_names:
-                                    names.add(n)
-            except Exception as e:
-                logger.debug(f"Error checking embedded header images in candidate identification: {e}")
+        # Full name variations
+        targets.add(clean)
+        targets.add(clean.upper())
+        targets.add(clean.title())
+        targets.add(clean.lower())
 
-        # Expand candidate names with constituent tokens
-        expanded_names: Set[str] = set()
-        for name in names:
-            expanded_names.add(name)
-            # Add Latin constituent parts (len >= 4, uppercase or title case)
-            parts = [p.strip() for p in name.split() if len(p.strip()) >= 4]
-            for p in parts:
-                if p.lower() not in RESUME_STOPWORDS and not re.match(r'^\d+$', p):
-                    if p.isupper() or p[0].isupper():
-                        expanded_names.add(p)
-            # Add Arabic constituent parts and composite variations
-            if any('\u0600' <= c <= '\u06FF' or '\uFB50' <= c <= '\uFEFF' for c in name):
-                norm_name = normalize_arabic(name)
-                expanded_names.add(norm_name)
-                if 'عبد ' in norm_name:
-                    expanded_names.add(norm_name.replace('عبد ', 'عبد'))
-                elif 'عبد' in norm_name:
-                    expanded_names.add(re.sub(r'عبد(\w+)', r'عبد \1', norm_name))
-                for w in norm_name.split():
-                    if len(w) >= 3 and w not in RESUME_STOPWORDS:
-                        expanded_names.add(w)
+        words = [w for w in re.split(r'[\s\-]+', clean) if w]
+        if len(words) == 2:
+            targets.add(f"{words[1]} {words[0]}")
+            targets.add(f"{words[1].upper()} {words[0].upper()}")
+            targets.add(f"{words[1].title()} {words[0].title()}")
 
-        return expanded_names
+        # Add family name ONLY if length >= 5 and NOT a common given name and NOT a stopword
+        for w in words:
+            w_low = w.lower()
+            if len(w) >= 5 and w_low not in COMMON_GIVEN_NAMES and w_low not in RESUME_STOPWORDS:
+                targets.add(w)
+                targets.add(w.upper())
+                targets.add(w.title())
+
+        # Arabic normalization forms
+        if any('\u0600' <= c <= '\u06FF' for c in clean):
+            norm = normalize_arabic(clean)
+            targets.add(norm)
+            if 'عبد ' in norm:
+                targets.add(norm.replace('عبد ', 'عبد'))
+            elif 'عبد' in norm:
+                targets.add(re.sub(r'عبد(\w+)', r'عبد \1', norm))
+            for w in norm.split():
+                if len(w) >= 4 and w not in COMMON_GIVEN_NAMES and w not in RESUME_STOPWORDS:
+                    targets.add(w)
+
+        return targets
+
+    def _identify_candidate_names(self, doc: fitz.Document) -> Set[str]:
+        """Identifies the single candidate name and generates its search strings."""
+        cand = self._extract_single_candidate_name(doc)
+        targets: Set[str] = set()
+        if cand:
+            targets.update(self._generate_candidate_search_strings(cand))
+
+        # Also include any attestation recipient name
+        att_names = self._extract_attestation_names(doc)
+        for aname in att_names:
+            targets.update(self._generate_candidate_search_strings(aname))
+
+        return targets
 
     def _redact_searchable_page(
         self,
@@ -424,13 +532,6 @@ class CVRedactor:
         """
         raw_text = page.get_text()
         if not raw_text.strip():
-            # Check for faces even on pages with little or no text
-            face_rects = self.face_detector.detect_faces_on_page(page, dpi=150)
-            for face_rect in face_rects:
-                page.add_redact_annot(face_rect, fill=self.redact_fill_color)
-                summary["entities_found"]["PROFILE_PHOTO"] += 1
-                summary["total_redactions"] += 1
-            page.apply_redactions(images=fitz.PDF_REDACT_IMAGE_PIXELS)
             return
 
         detected_lang = detect_language(raw_text)
@@ -459,9 +560,9 @@ class CVRedactor:
             page_words = page.get_text('words')
             for w in page_words:
                 norm_w = normalize_arabic(w[4])
-                if norm_w and len(norm_w) >= 3 and norm_w not in RESUME_STOPWORDS:
+                if norm_w and len(norm_w) >= 4 and norm_w not in RESUME_STOPWORDS and norm_w not in COMMON_GIVEN_NAMES:
                     for target in norm_target_names:
-                        if norm_w == target or (len(norm_w) >= 4 and norm_w in target):
+                        if norm_w == target or (len(norm_w) >= 5 and norm_w in target):
                             pad_r = fitz.Rect(
                                 w[0] - self.padding_pt,
                                 w[1] - self.padding_pt,
@@ -476,14 +577,24 @@ class CVRedactor:
         # Matches international (+XX...), French (06..., 07...), and Moroccan (05..., 06..., 07...)
         phone_pattern = re.compile(
             r'(?<!\d)(?:(?:\+|00)(?:33|212)[\s.-]?(?:\(0\)[\s.-]?)?|0)[1-7](?:[\s.-]?\d{2}){4}(?!\d)|'
-            r'(?<!\d)(?:\+|00)[1-9]\d{0,3}[\s.-]?(?:\(?\d{1,4}\)?[\s.-]?)?\d{2,4}[\s.-]?\d{2,4}(?!\d)'
+            r'(?<!\d)(?:\+|00)[1-9]\d{0,3}[\s.-]?(?:\(?\d{1,4}\)?[\s.-]?)?\d{2,4}[\s.-]?\d{2,4}(?!\d)|'
+            r'(?<!\d)[567]\d{8}(?!\d)'
         )
         for m in phone_pattern.finditer(raw_text):
             phone_str = m.group()
             if len(re.findall(r'\d', phone_str)) >= 8:
                 for r in page.search_for(phone_str):
+                    pad_x0 = r.x0 - self.padding_pt
+                    # Check if there is an adjacent prefix like +212 or 212 or + immediately before r
+                    prefix_rect = fitz.Rect(max(0, r.x0 - 45), r.y0 - 2, r.x0, r.y1 + 2)
+                    prefix_text = page.get_text("text", clip=prefix_rect).strip()
+                    if any(p in prefix_text for p in ["212", "+"]):
+                        for match_pref in ["+212", "212", "+"]:
+                            pref_rects = page.search_for(match_pref, clip=prefix_rect)
+                            if pref_rects:
+                                pad_x0 = min(pad_x0, min(pr.x0 for pr in pref_rects) - self.padding_pt)
                     pad_r = fitz.Rect(
-                        r.x0 - self.padding_pt,
+                        pad_x0,
                         r.y0 - self.padding_pt,
                         r.x1 + self.padding_pt,
                         r.y1 + self.padding_pt
@@ -510,13 +621,59 @@ class CVRedactor:
                         redaction_rects.append((pad_r, "EMAIL_ADDRESS"))
                         summary["entities_found"]["EMAIL_ADDRESS"] += 1
 
-        # 4. Profile Photo & Face Detection
-        face_rects = self.face_detector.detect_faces_on_page(page, dpi=150)
-        for face_rect in face_rects:
-            redaction_rects.append((face_rect, "PROFILE_PHOTO"))
-            summary["entities_found"]["PROFILE_PHOTO"] += 1
+        # 3b. Redact embedded graphic header cards on Page 0 (e.g., Canva/Word headers)
+        if page_idx == 0:
+            for img_info in page.get_images():
+                xref = img_info[0]
+                rects = page.get_image_rects(xref)
+                if rects and rects[0].y0 < page.rect.height * 0.40 and rects[0].width > 80 and rects[0].height > 25:
+                    img_rect = rects[0]
+                    try:
+                        pix = fitz.Pixmap(page.parent, xref)
+                        pil_img = Image.open(io.BytesIO(pix.tobytes()))
+                        ocr_engine = self._get_ocr_engine()
+                        if ocr_engine != "pytesseract":
+                            res = ocr_engine(np.array(pil_img))
+                            raw_items = []
+                            if hasattr(res, 'boxes') and hasattr(res, 'txts') and res.boxes is not None:
+                                for b_pts, txt in zip(res.boxes, res.txts):
+                                    raw_items.append((b_pts, txt))
+                            elif isinstance(res, (list, tuple)) and res and res[0]:
+                                for item in res[0]:
+                                    raw_items.append((item[0], item[1]))
 
-        # 5. Apply native redaction annotations
+                            scale_x = img_rect.width / pix.w
+                            scale_y = img_rect.height / pix.h
+                            for b_pts, txt in raw_items:
+                                is_match = False
+                                etype = ""
+                                if candidate_names and any(part.lower() in txt.lower() for part in candidate_names if len(part) >= 4):
+                                    if txt.lower() not in RESUME_STOPWORDS and txt.lower() not in COMMON_GIVEN_NAMES:
+                                        is_match = True
+                                        etype = "PERSON"
+                                elif re.search(r'(?:\+|00|0)?[5-7]\d{8}', re.sub(r'[\s.-]', '', txt)):
+                                    is_match = True
+                                    etype = "PHONE_NUMBER"
+                                elif '@' in txt and '.' in txt:
+                                    is_match = True
+                                    etype = "EMAIL_ADDRESS"
+
+                                if is_match:
+                                    bx0 = min(pt[0] for pt in b_pts)
+                                    by0 = min(pt[1] for pt in b_pts)
+                                    bx1 = max(pt[0] for pt in b_pts)
+                                    by1 = max(pt[1] for pt in b_pts)
+                                    px0 = img_rect.x0 + bx0 * scale_x
+                                    py0 = img_rect.y0 + by0 * scale_y
+                                    px1 = img_rect.x0 + bx1 * scale_x
+                                    py1 = img_rect.y0 + by1 * scale_y
+                                    r = fitz.Rect(px0 - 2, py0 - 2, px1 + 2, py1 + 2)
+                                    redaction_rects.append((r, etype))
+                                    summary["entities_found"][etype] += 1
+                    except Exception as e:
+                        logger.debug(f"Embedded header image redaction error: {e}")
+
+        # 4. Apply native redaction annotations (NO FACE REDACTIONS)
         applied_rects: List[fitz.Rect] = []
         for rect, etype in redaction_rects:
             if any(rect in app for app in applied_rects):
@@ -544,25 +701,9 @@ class CVRedactor:
             pix = page.get_pixmap(dpi=dpi)
             img_pil = Image.frombytes("RGB", (pix.w, pix.h), pix.samples)
             img_np = np.array(img_pil)
-
             draw = ImageDraw.Draw(img_pil)
 
-            # 1. Face detection
-            face_boxes = self.face_detector.detect_faces_in_numpy(img_np, is_rgb=True)
-            for (fx, fy, fw, fh) in face_boxes:
-                pad_w = int(fw * 0.20)
-                pad_h = int(fh * 0.25)
-                box = [
-                    max(0, fx - pad_w),
-                    max(0, fy - pad_h),
-                    min(pix.w, fx + fw + pad_w),
-                    min(pix.h, fy + fh + pad_h),
-                ]
-                draw.rectangle(box, fill=(0, 0, 0))
-                summary["entities_found"]["PROFILE_PHOTO"] += 1
-                summary["total_redactions"] += 1
-
-            # 2. OCR text extraction
+            # 1. OCR text extraction
             ocr_boxes: List[Dict[str, Any]] = []
             full_ocr_text = ""
 
@@ -624,7 +765,7 @@ class CVRedactor:
                             continue
 
                     # Mask Phone
-                    if re.search(r'(?:\+|00|0)[5-7]\d{8}', re.sub(r'[\s.-]', '', txt)):
+                    if re.search(r'(?:\+|00|0)?[5-7]\d{8}', re.sub(r'[\s.-]', '', txt)):
                         draw.rectangle([x0 - 4, y0 - 4, x1 + 4, y1 + 4], fill=(0, 0, 0))
                         summary["entities_found"]["PHONE_NUMBER"] += 1
                         summary["total_redactions"] += 1
@@ -737,23 +878,7 @@ class CVRedactor:
         img_np = np.array(pil_img)
         w_img, h_img = pil_img.size
         draw = ImageDraw.Draw(pil_img)
-
-        # 1. Face detection
-        face_boxes = self.face_detector.detect_faces_in_numpy(img_np, is_rgb=True)
-        for (fx, fy, fw, fh) in face_boxes:
-            pad_w = int(fw * 0.20)
-            pad_h = int(fh * 0.25)
-            box = [
-                max(0, fx - pad_w),
-                max(0, fy - pad_h),
-                min(w_img, fx + fw + pad_w),
-                min(h_img, fy + fh + pad_h),
-            ]
-            draw.rectangle(box, fill=(0, 0, 0))
-            summary["entities_found"]["PROFILE_PHOTO"] += 1
-            summary["total_redactions"] += 1
-
-        # 2. OCR for text in certificates / documents
+        # 1. OCR for text in certificates / documents (NO FACE REDACTIONS)
         ocr_engine = self._get_ocr_engine()
         if ocr_engine != "pytesseract":
             try:
@@ -776,14 +901,14 @@ class CVRedactor:
 
                     # Check for candidate name
                     if active_names and any(part.lower() in txt.lower() for part in active_names if len(part) >= 4):
-                        if txt.lower() not in RESUME_STOPWORDS:
+                        if txt.lower() not in RESUME_STOPWORDS and txt.lower() not in COMMON_GIVEN_NAMES:
                             draw.rectangle([x0 - 4, y0 - 4, x1 + 4, y1 + 4], fill=(0, 0, 0))
                             summary["entities_found"]["PERSON"] += 1
                             summary["total_redactions"] += 1
                             continue
 
                     # Check for phone
-                    if re.search(r'(?:\+|00|0)[5-7]\d{8}', re.sub(r'[\s.-]', '', txt)):
+                    if re.search(r'(?:\+|00|0)?[5-7]\d{8}', re.sub(r'[\s.-]', '', txt)):
                         draw.rectangle([x0 - 4, y0 - 4, x1 + 4, y1 + 4], fill=(0, 0, 0))
                         summary["entities_found"]["PHONE_NUMBER"] += 1
                         summary["total_redactions"] += 1
