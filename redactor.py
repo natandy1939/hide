@@ -125,7 +125,16 @@ RESUME_STOPWORDS: Set[str] = {
     'متزوج', 'عازب', 'أعزب', 'نبذة', 'عني', 'الهوايات', 'التخصص',
     'دكتور', 'مهندس', 'تقني', 'مدير', 'رئيس', 'مسؤول', 'مستشار',
     'الشواهد', 'شواهد', 'أكاديمية', 'األكاديمية', 'الأكاديمية', 'االكاديمية',
-    'أكاديمي', 'األكاديمي', 'الأكاديمي', 'تجارب', 'تكوينات', 'تكوين', 'الشخصية'
+    'أكاديمي', 'األكاديمي', 'الأكاديمي', 'تجارب', 'تكوينات', 'تكوين', 'الشخصية',
+    'experiences', 'expériences', 'professionnelle', 'professionnelles', 'professionnel', 'figure'
+}
+
+MONTHS_WORDS: Set[str] = {
+    'janvier', 'fevrier', 'février', 'mars', 'avril', 'mai', 'juin',
+    'juillet', 'aout', 'août', 'septembre', 'octobre', 'novembre', 'decembre', 'décembre',
+    'january', 'february', 'march', 'april', 'may', 'june',
+    'july', 'august', 'september', 'october', 'november', 'december',
+    'يناير', 'فبراير', 'مارس', 'أبريل', 'مايو', 'يونيو', 'يوليو', 'غشت', 'شتنبر', 'أكتوبر', 'نونبر', 'دجنبر'
 }
 
 
@@ -348,47 +357,69 @@ class CVRedactor:
             words = [w for w in re.split(r'[\s\-_]+', candidate_str) if w]
             if 1 <= len(words) <= 4:
                 clean = ' '.join(words)
-                if not any(w.lower() in RESUME_STOPWORDS for w in words):
-                    return clean
+                if not re.search(r'\d', clean) and not any(w.lower() in MONTHS_WORDS for w in words):
+                    if not any(w.lower() in RESUME_STOPWORDS for w in words):
+                        return clean
 
-        # 2. Visual layout hierarchy: font size and top placement
+        # 2. Visual layout hierarchy: block-level grouping and font ranking
         try:
             page_dict = page.get_text('dict')
             blocks = page_dict.get('blocks', [])
-            spans_by_line = []
+            candidates = []
             for b in blocks:
-                if 'lines' in b:
+                y0 = b.get('bbox', [0, 0, 0, 0])[1]
+                if y0 < page.rect.height * 0.40 and 'lines' in b:
+                    block_lines = []
                     for l in b['lines']:
-                        line_spans = []
-                        for s in l['spans']:
-                            st = s['text'].strip()
-                            if len(st) >= 2 and not re.match(r'^[\d\s\W]+$', st):
-                                if '@' not in st and not re.search(r'(?:\+?212|0[5-7])\d{8}', st):
-                                    line_spans.append(s)
-                        if line_spans:
-                            combined = ' '.join(s['text'].strip() for s in line_spans)
-                            max_sz = max(s['size'] for s in line_spans)
-                            min_y0 = min(s['bbox'][1] for s in line_spans)
-                            if min_y0 < page.rect.height * 0.38:
-                                spans_by_line.append((max_sz, min_y0, combined))
+                        spans = [s for s in l.get('spans', []) if s['text'].strip()]
+                        if not spans:
+                            continue
+                        line_text = ' '.join(s['text'].strip() for s in spans)
+                        max_font = max(s['size'] for s in spans)
+                        block_lines.append((max_font, line_text))
 
-            # Prioritize top 22% of page first (true header), then fallback to top 38%
-            top_header_spans = [s for s in spans_by_line if s[1] < page.rect.height * 0.22]
-            lower_header_spans = [s for s in spans_by_line if s[1] >= page.rect.height * 0.22]
+                    if not block_lines:
+                        continue
 
-            for group in [top_header_spans, lower_header_spans]:
-                group.sort(key=lambda x: (-x[0], x[1]))
-                for sz, y0, line_text in group:
-                    clean = re.sub(r'\s+', ' ', line_text).strip()
-                    clean = re.sub(r'^(?:M\.|Mme|Mlle|Monsieur|Madame|Dr\.?|Mr\.?)\s+', '', clean, flags=re.IGNORECASE)
-                    clean = re.sub(r'^(?:المغرب|المملكة المغربية|الدار البيضاء|الرباط|سلا|فاس|طنجة|مكناس|أكادير|تطوان|وجدة|القنيطرة)\s*', '', clean)
-                    words = [w for w in re.split(r'[\s\-]+', clean) if w]
-                    if any(w.lower() in RESUME_STOPWORDS for w in words):
-                        continue
-                    if any(h in clean.upper() for h in ['CURRICULUM', 'VITAE', 'DONNEES', 'PERSONNELS', 'PROFIL', 'CONTACT', 'RESUME']):
-                        continue
-                    if 1 <= len(words) <= 4 and 4 <= len(clean) <= 40:
-                        return clean
+                    max_b_font = max(bl[0] for bl in block_lines)
+                    if max_b_font >= 13.0:
+                        merged_parts = [ltxt for fsz, ltxt in block_lines if fsz >= max_b_font - 3.5]
+                        comb = ' '.join(merged_parts)
+                        candidates.append((max_b_font, y0, comb))
+                    else:
+                        for fsz, ltxt in block_lines:
+                            candidates.append((fsz, y0, ltxt))
+
+            valid_candidates = []
+            for fsz, y0, line_text in candidates:
+                clean = re.sub(r'\s+', ' ', line_text).strip()
+                clean = re.sub(r'^(?:M\.|Mme|Mlle|Monsieur|Madame|Dr\.?|Mr\.?)\s+', '', clean, flags=re.IGNORECASE)
+                clean = re.sub(r'^(?:المغرب|المملكة المغربية|الدار البيضاء|الرباط|سلا|فاس|طنجة|مكناس|أكادير|تطوان|وجدة|القنيطرة)\s*', '', clean)
+                clean = clean.strip(' :,;.-/|*')
+
+                if re.search(r'\d', clean):
+                    continue
+                if any(c in clean for c in ['@', 'http', 'www', '.com', '.ma', '.fr']):
+                    continue
+
+                words = [w for w in re.split(r'[\s\-]+', clean) if w]
+                if not words:
+                    continue
+                if any(w.lower() in MONTHS_WORDS for w in words):
+                    continue
+                if any(w.lower() in RESUME_STOPWORDS for w in words):
+                    continue
+                if any(h in clean.upper() for h in ['CURRICULUM', 'VITAE', 'DONNEES', 'PERSONNELS', 'PROFIL', 'CONTACT', 'RESUME', 'FORMATION', 'COMPETENCES', 'EXPERIENCE', 'LANGUES', 'FIGURE']):
+                    continue
+
+                if 2 <= len(words) <= 4 and 4 <= len(clean) <= 40:
+                    valid_candidates.append((fsz, y0, clean))
+                elif len(words) == 1 and 4 <= len(clean) <= 25 and fsz >= 18.0:
+                    valid_candidates.append((fsz, y0, clean))
+
+            if valid_candidates:
+                valid_candidates.sort(key=lambda x: (-x[0], x[1]))
+                return valid_candidates[0][2]
         except Exception as e:
             logger.debug(f"Visual layout hierarchy error: {e}")
 

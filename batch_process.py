@@ -10,8 +10,8 @@ from redactor import CVRedactor
 logging.basicConfig(level=logging.INFO, format='%(asctime)s [%(levelname)s] %(message)s')
 logger = logging.getLogger('batch_process')
 
-INPUT_ROOT = 'test'
-OUTPUT_ROOT = 'result'
+INPUT_ROOT = sys.argv[1] if len(sys.argv) > 1 else ('data' if os.path.exists('data') else 'test')
+OUTPUT_ROOT = sys.argv[2] if len(sys.argv) > 2 else 'result'
 
 
 def discover_candidate_folders(input_root: str) -> List[Tuple[str, List[str]]]:
